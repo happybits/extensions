@@ -12,14 +12,14 @@
     "build": "npm run clean && npm run compile",
     "clean": "rimraf ./lib",
     "compile": "tsc",
-    "import": "node ./lib/index.js",
+    "import": "node ./lib/scripts/import/src/index.js",
     "prepare": "npm run build"
   },
   "files": [
     "lib"
   ],
   "bin": {
-    "fs-bq-import-collection": "./lib/scripts/import/src/index.js"
+    "fs-bq-import-collection": "./lib/index.js"
   },
   "author": "Jan Wyszynski <wyszynski@google.com>",
   "license": "Apache-2.0",
