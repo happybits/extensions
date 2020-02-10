@@ -1,13 +1,20 @@
 {
   "compilerOptions": {
-    "lib": ["es6"],
+    "lib": [
+      "es6"
+    ],
     "module": "commonjs",
     "noImplicitReturns": true,
     "outDir": "lib",
     "sourceMap": false,
-    "target": "es6"
+    "target": "es6",
+    "typeRoots": []
   },
   "compileOnSave": true,
-  "include": ["src"],
-  "exclude": ["**/node_modules/@types/jest/**"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "**/node_modules/@types/jest/**"
+  ]
 }

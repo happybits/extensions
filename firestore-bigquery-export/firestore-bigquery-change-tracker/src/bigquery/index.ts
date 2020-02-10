@@ -82,7 +82,7 @@ export class FirestoreBigQueryEventHistoryTracker
       const dataset = this.bq.dataset(this.config.datasetId);
       const table = dataset.table(this.rawChangeLogTableName());
       logs.dataInserting(rows.length);
-      await table.insert(payload, options);
+      await table.insert(rows, options);
       logs.dataInserted(rows.length);
     } catch (e) {
       // Reinitializing in case the destintation table is modified.
