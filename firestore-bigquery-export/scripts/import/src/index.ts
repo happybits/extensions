@@ -16,7 +16,6 @@
  * limitations under the License.
  */
 
-import * as bigquery from "@google-cloud/bigquery";
 import * as firebase from "firebase-admin";
 import * as fs from "fs";
 import * as inquirer from "inquirer";
@@ -26,7 +25,7 @@ import {
   ChangeType,
   FirestoreBigQueryEventHistoryTracker,
   FirestoreDocumentChangeEvent,
-} from "@firebaseextensions/firestore-bigquery-change-tracker";
+} from "./../../../firestore-bigquery-change-tracker/src/index";
 
 // For reading cursor position.
 const exists = util.promisify(fs.exists);
@@ -37,10 +36,14 @@ const unlink = util.promisify(fs.unlink);
 const BIGQUERY_VALID_CHARACTERS = /^[a-zA-Z0-9_]+$/;
 const FIRESTORE_VALID_CHARACTERS = /^[^\/]+$/;
 
+const WILDCARD = /^{.*}/;
+const HAS_WILDCARD = /^.*{.*}.*/;
 const FIRESTORE_COLLECTION_NAME_MAX_CHARS = 6144;
 const BIGQUERY_RESOURCE_NAME_MAX_CHARS = 1024;
 
 const FIRESTORE_DEFAULT_DATABASE = "(default)";
+
+const isWildCardPath = (path) => path.match(HAS_WILDCARD);
 
 const validateInput = (
   value: string,
@@ -56,6 +59,13 @@ const validateInput = (
   }
   if (!value.match(regex)) {
     return `The ${name} must only contain letters or spaces`;
+  }
+
+  if (name === "sourceCollectionPath") {
+    let steps = value.split("/");
+    if (steps[steps.length - 1].match(WILDCARD)) {
+      return `${name} must not end in a wildcard: ${value}`;
+    }
   }
   return true;
 };
@@ -157,67 +167,159 @@ const run = async (): Promise<number> => {
     `Importing data from Cloud Firestore Collection: ${sourceCollectionPath}, to BigQuery Dataset: ${datasetId}, Table: ${rawChangeLogName}`
   );
 
-  // Build the data row with a 0 timestamp. This ensures that all other
-  // operations supersede imports when listing the live documents.
-  let cursor;
-
-  let cursorPositionFile =
-    __dirname +
-    `/from-${sourceCollectionPath}-to-${projectId}_${datasetId}_${rawChangeLogName}`;
-  if (await exists(cursorPositionFile)) {
-    let cursorDocumentId = (await read(cursorPositionFile)).toString();
-    cursor = await firebase
-      .firestore()
-      .collection(sourceCollectionPath)
-      .doc(cursorDocumentId)
-      .get();
-    console.log(
-      `Resuming import of Cloud Firestore Collection ${sourceCollectionPath} from document ${cursorDocumentId}.`
-    );
-  }
-
   let totalDocsRead = 0;
   let totalRowsImported = 0;
 
-  do {
-    if (cursor) {
-      await write(cursorPositionFile, cursor.id);
-    }
-    let query = firebase
-      .firestore()
-      .collection(sourceCollectionPath)
-      .limit(batch);
-    if (cursor) {
-      query = query.startAfter(cursor);
-    }
-    const snapshot = await query.get();
-    const docs = snapshot.docs;
-    if (docs.length === 0) {
-      break;
-    }
-    totalDocsRead += docs.length;
-    cursor = docs[docs.length - 1];
-    const rows: FirestoreDocumentChangeEvent[] = docs.map((snapshot) => {
-      return {
-        timestamp: new Date(0).toISOString(), // epoch
-        operation: ChangeType.IMPORT,
-        documentName: `projects/${projectId}/databases/${FIRESTORE_DEFAULT_DATABASE}/documents/${
-          snapshot.ref.path
-        }`,
-        eventId: "",
-        data: snapshot.data(),
-      };
-    });
-    await dataSink.record(rows);
-    totalRowsImported += rows.length;
-  } while (true);
+  // If the path contains sub-collections / wildcard values, we must traverse
+  // the data tree and collect the paths located at the leaves.
+  let collectionPaths;
+  if (isWildCardPath) {
+    let steps = sourceCollectionPath.split("/");
+    let collections;
+    // Track collections to be imported
+    let i = 0;
+    for (let step of steps) {
+      // First iteration requires top level collection
+      if (!collections) {
+        collections = [firebase.firestore()];
+      }
 
-  try {
-    await unlink(cursorPositionFile);
-  } catch (e) {
-    console.log(
-      `Error unlinking journal file ${cursorPositionFile} after successful import: ${e.toString()}`
-    );
+      // If Wildcard pattern {...}
+      if (step.match(WILDCARD)) {
+        // All refs should be CollectionReferences
+        // Get all docs from collection reference
+        collections = await collections.reduce(async (acc, doc) => {
+          let docs = await doc.listDocuments();
+          if (docs.length === 0) {
+            return acc;
+          }
+          return acc.concat(docs);
+        }, []);
+      } else {
+        // If collection step, all refs should be DocumentReferences
+        // If step is the last, return the path only
+        if (i === steps.length - 1) {
+          collections = collections.map((ref) => ref.collection(step).path);
+        } else {
+          collections = collections.map((ref) => ref.collection(step));
+        }
+      }
+      i += 1;
+    }
+    collectionPaths = collections;
+  } else {
+    collectionPaths = [sourceCollectionPath];
+  }
+
+  const slugifyPath = (path) => {
+    return path.split("/").join("_");
+  };
+
+  // Sort cursor position files across entire job. Only delete them once
+  // script finishes. This ensures checkpointing will maintain the position
+  // across files.
+  let cursorPositionFiles = new Set<string>();
+  let rows: FirestoreDocumentChangeEvent[] = [];
+  let dataSinkPromises = [];
+  // In order to batch across multiple collections, must globally track
+  let i = 0;
+  for (let path of collectionPaths) {
+    // Build the data row with a 0 timestamp. This ensures that all other
+    // operations supersede imports when listing the live documents.
+    let cursor;
+
+    let cursorPositionFile =
+      __dirname +
+      `/from-${slugifyPath(
+        path
+      )}-to-${projectId}_${datasetId}_${rawChangeLogName}`;
+
+    if (await exists(cursorPositionFile)) {
+      let cursorDocumentId = (await read(cursorPositionFile)).toString();
+      cursor = await firebase
+        .firestore()
+        .collection(sourceCollectionPath)
+        .doc(cursorDocumentId)
+        .get();
+      console.log(
+        `Resuming import of Cloud Firestore Collection ${sourceCollectionPath} from document ${cursorDocumentId}.`
+      );
+    }
+
+    do {
+      if (cursor) {
+        await write(cursorPositionFile, cursor.id);
+        cursorPositionFiles.add(cursorPositionFile);
+      }
+
+      // Batch size for sub-query: batch - i
+      let query = firebase
+        .firestore()
+        .collection(path)
+        .limit(batch - i);
+      if (cursor) {
+        query = query.startAfter(cursor);
+      }
+      const snapshot = await query.get();
+      const docs = snapshot.docs;
+      if (docs.length === 0) {
+        break;
+      }
+      totalDocsRead += docs.length;
+      cursor = docs[docs.length - 1];
+      const rowsBatch: FirestoreDocumentChangeEvent[] = docs.map((snapshot) => {
+        return {
+          timestamp: new Date(0).toISOString(), // epoch
+          operation: ChangeType.IMPORT,
+          documentName: `projects/${projectId}/databases/${FIRESTORE_DEFAULT_DATABASE}/documents/${
+            snapshot.ref.path
+          }`,
+          eventId: "",
+          data: snapshot.data(),
+        };
+      });
+      totalRowsImported += rowsBatch.length;
+      i += rowsBatch.length;
+      rows = rows.concat(rowsBatch);
+
+      // Only record rows if N total tracked rows === batch
+      // On first dataSink record, need to check to see if dataset
+      // exists. If it doesn't, BigQuery will throw a bunch of errors if
+      // we record asynchronously. `await` first record to ensure the resources
+      // are created.
+      if (i >= batch) {
+        if (dataSinkPromises.length === 0) {
+          let resourcesExist = await dataSink.bq.dataset(datasetId).exists();
+          // Create resources via record
+          if (!resourcesExist[0]) {
+            await dataSink.record(rows);
+            rows = [];
+            i = 0;
+            continue;
+          }
+        }
+        dataSinkPromises.push(dataSink.record(rows));
+        rows = [];
+        i = 0;
+      }
+    } while (true);
+  }
+
+  // Ensure all tracked rows are recorded
+  if (rows.length !== 0) {
+    dataSinkPromises.push(dataSink.record(rows));
+  }
+
+  await Promise.all(dataSinkPromises);
+
+  for (let cursorPositionFile of cursorPositionFiles) {
+    try {
+      await unlink(cursorPositionFile);
+    } catch (e) {
+      console.log(
+        `Error unlinking journal file ${cursorPositionFile} after successful import: ${e.toString()}`
+      );
+    }
   }
 
   return totalRowsImported;
