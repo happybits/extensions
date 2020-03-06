@@ -35,6 +35,7 @@ const unlink = util.promisify(fs.unlink);
 
 const BIGQUERY_VALID_CHARACTERS = /^[a-zA-Z0-9_]+$/;
 const FIRESTORE_VALID_CHARACTERS = /^[^\/]+$/;
+const FIRESTORE_PATH_VALID_CHARACTERS = /^[a-zA-Z{}\/ ]+$/;
 
 const WILDCARD = /^{.*}/;
 const HAS_WILDCARD = /^.*{.*}.*/;
@@ -44,6 +45,21 @@ const BIGQUERY_RESOURCE_NAME_MAX_CHARS = 1024;
 const FIRESTORE_DEFAULT_DATABASE = "(default)";
 
 const isWildCardPath = (path) => path.match(HAS_WILDCARD);
+
+// Ensure the path provided has the correct format
+const hasCorrectPathFormat = (steps) => {
+  return steps.reduce((acc, step) => {
+    if (!acc.correct) {
+      return acc;
+    }
+    if ((isWildCardPath(step) && isWildCardPath(acc.prev)) || (!isWildCardPath(step) && !isWildCardPath(acc.prev))) {
+      acc.correct = false;
+      return acc;
+    }
+    acc.prev = step;
+    return acc;
+  }, {correct: true, prev: "{}"}).correct;
+};
 
 const validateInput = (
   value: string,
@@ -61,11 +77,16 @@ const validateInput = (
     return `The ${name} must only contain letters or spaces`;
   }
 
-  if (name === "sourceCollectionPath") {
+  if (name === "collection path") {
     let steps = value.split("/");
     if (steps[steps.length - 1].match(WILDCARD)) {
       return `${name} must not end in a wildcard: ${value}`;
     }
+    
+    if(!hasCorrectPathFormat(steps)) {
+      return `${name} must follow format 'aaa/{wildcard}/bbb/.../zzz`
+    }
+    
   }
   return true;
 };
@@ -93,7 +114,7 @@ const questions = [
       validateInput(
         value,
         "collection path",
-        FIRESTORE_VALID_CHARACTERS,
+        FIRESTORE_PATH_VALID_CHARACTERS,
         FIRESTORE_COLLECTION_NAME_MAX_CHARS
       ),
   },
