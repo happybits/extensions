@@ -35,7 +35,7 @@ const unlink = util.promisify(fs.unlink);
 
 const BIGQUERY_VALID_CHARACTERS = /^[a-zA-Z0-9_]+$/;
 const FIRESTORE_VALID_CHARACTERS = /^[^\/]+$/;
-const FIRESTORE_PATH_VALID_CHARACTERS = /^[a-zA-Z{}\/ ]+$/;
+const FIRESTORE_PATH_VALID_CHARACTERS = /^[a-zA-Z{}\/ _]+$/;
 
 const WILDCARD = /^{.*}/;
 const HAS_WILDCARD = /^.*{.*}.*/;
@@ -74,7 +74,7 @@ const validateInput = (
     return `${name} must be at most ${sizeLimit} characters long`;
   }
   if (!value.match(regex)) {
-    return `The ${name} must only contain letters or spaces`;
+    return `The ${name} must only contain letters, spaces, or underscores`;
   }
 
   if (name === "collection path") {
