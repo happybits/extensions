@@ -209,8 +209,9 @@ const run = async (): Promise<number> => {
       if (step.match(WILDCARD)) {
         // All refs should be CollectionReferences
         // Get all docs from collection reference
-        collections = await collections.reduce(async (acc, doc) => {
-          let docs = await doc.listDocuments();
+        collections = await collections.reduce(async (acc, col) => {
+          let docs = await col.listDocuments();
+          acc = await Promise.resolve(acc);
           if (docs.length === 0) {
             return acc;
           }
